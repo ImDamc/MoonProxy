@@ -9,43 +9,50 @@ function isGoogleUrl(url) {
   return true
 }
 
-async function fetchWithRedirects(startUrl, maxRedirects = 10) {
+function normalizeInput(q) {
+  if (!q) return null
+  const t = q.trim()
+  if (t.startsWith("http://") || t.startsWith("https://")) return t
+  if (t.includes(" ")) return "https://www.google.com/search?q=" + encodeURIComponent(t)
+  if (t.includes(".")) return "https://" + t
+  return "https://www.google.com/search?q=" + encodeURIComponent(t)
+}
+
+async function fetchWithRedirects(startUrl, maxRedirects = 15) {
   const chain = []
   let url = startUrl
   for (let i = 0; i < maxRedirects; i++) {
+    if (chain.includes(url)) return { chain, final: { url, error: "loop_detected" } }
     chain.push(url)
-    const r = await fetch(url, {
-      method: "GET",
-      redirect: "manual",
-      headers: { "User-Agent": "EducationalProxy/1.0" }
-    })
+    const r = await fetch(url, { method: "GET", redirect: "manual", headers: { "User-Agent": "EducationalProxy/1.0" } })
     if (r.status >= 300 && r.status < 400) {
       const loc = r.headers.get("location")
-      if (!loc) {
-        return { chain, final: { url, status: r.status, headers: r.headers, body: await r.text() } }
-      }
+      if (!loc) return { chain, final: { url, status: r.status, headers: r.headers, body: await r.text() } }
       let next
-      try {
-        next = new URL(loc, url).toString()
-      } catch {
-        return { chain, final: { url, status: r.status, headers: r.headers, body: await r.text() } }
-      }
-      if (!isGoogleUrl(next)) {
-        chain.push(next)
-        return { chain, final: { url: next, status: r.status, headers: r.headers, body: null, stoppedAtNonGoogle: true } }
-      }
+      try { next = new URL(loc, url).toString() } catch { return { chain, final: { url, status: r.status, headers: r.headers, body: await r.text() } } }
+      if (!isGoogleUrl(next)) { chain.push(next); return { chain, final: { url: next, status: r.status, headers: r.headers, body: null, stoppedAtNonGoogle: true } } }
       url = next
       continue
-    } else {
-      const contentType = r.headers.get("content-type") || ""
-      if (contentType.includes("text/html")) {
-        const body = await r.text()
-        return { chain, final: { url, status: r.status, headers: r.headers, body, contentType } }
-      } else {
-        const buffer = await r.buffer()
-        return { chain, final: { url, status: r.status, headers: r.headers, body: buffer, contentType } }
+    }
+    const contentType = r.headers.get("content-type") || ""
+    if (!contentType.includes("text/html")) {
+      const buffer = await r.buffer()
+      return { chain, final: { url, status: r.status, headers: r.headers, body: buffer, contentType } }
+    }
+    const body = await r.text()
+    const $ = cheerio.load(body)
+    const meta = $('meta[http-equiv="refresh"]').attr("content")
+    if (meta) {
+      const m = meta.split(";").map(x => x.trim())
+      if (m.length > 1 && m[1].toLowerCase().startsWith("url=")) {
+        let loc = m[1].slice(4)
+        try { loc = new URL(loc, url).toString() } catch { return { chain, final: { url, status: r.status, headers: r.headers, body } } }
+        if (!isGoogleUrl(loc)) { chain.push(loc); return { chain, final: { url: loc, status: r.status, headers: r.headers, body: null, stoppedAtNonGoogle: true } } }
+        url = loc
+        continue
       }
     }
+    return { chain, final: { url, status: r.status, headers: r.headers, body, contentType } }
   }
   return { chain, final: { url, status: 0, headers: null, body: null, error: "redirect_limit" } }
 }
@@ -53,25 +60,21 @@ async function fetchWithRedirects(startUrl, maxRedirects = 10) {
 app.get("/", (req, res) => {
   res.send(`
     <form action="/search" method="get">
-      <input name="q" placeholder="https://www.google.com/search?q=test" style="width:60%">
+      <input name="q" placeholder="google.com or https://www.google.com/search?q=test or a search term" style="width:60%">
       <button>Fetch</button>
     </form>
-    <p>Only google.com URLs are allowed and followed. Redirect chain will be shown at top.</p>
+    <p>Only google.com URLs allowed. You can pass plain host (google.com), full URL, or a search term.</p>
   `)
 })
 
 app.get("/search", async (req, res) => {
-  const q = (req.query.q || "").trim()
-  if (!q) return res.status(400).send("Missing ?q=")
-  if (!isGoogleUrl(q)) return res.status(403).send("Only google.com URLs allowed")
-
+  const raw = req.query.q || ""
+  const normalized = normalizeInput(raw)
+  if (!normalized) return res.status(400).send("Missing ?q=")
+  if (!isGoogleUrl(normalized)) return res.status(403).send("Only google.com URLs allowed")
   try {
-    const { chain, final } = await fetchWithRedirects(q, 15)
-
-    if (final.error) {
-      return res.status(500).send("Redirect limit reached or fetch error")
-    }
-
+    const { chain, final } = await fetchWithRedirects(normalized, 20)
+    if (final.error) return res.status(500).send("Error: " + final.error)
     if (final.stoppedAtNonGoogle) {
       return res.status(200).send(
         `<p>Stopped following redirect because it goes off-google:</p>
@@ -79,27 +82,20 @@ app.get("/search", async (req, res) => {
          <p>Final redirect target (not fetched): <a href="${chain[chain.length-1]}" target="_blank">${chain[chain.length-1]}</a></p>`
       )
     }
-
     if (!final.contentType || !final.contentType.includes("text/html")) {
       res.set("Content-Type", final.contentType || "application/octet-stream")
       return res.send(final.body)
     }
-
     const $ = cheerio.load(final.body)
-
     $("a[href]").each((i, el) => {
       const href = $(el).attr("href")
       if (!href) return
       try {
         const resolved = new URL(href, final.url).toString()
-        if (isGoogleUrl(resolved)) {
-          $(el).attr("href", "/search?q=" + encodeURIComponent(resolved))
-        } else {
-          $(el).attr("target", "_blank")
-        }
+        if (isGoogleUrl(resolved)) $(el).attr("href", "/search?q=" + encodeURIComponent(resolved))
+        else $(el).attr("target", "_blank")
       } catch {}
     })
-
     const banner = `
       <div style="background:#fffae6;border:1px solid #ffd24d;padding:8px;font-family:monospace;">
         <strong>Redirect chain (earliest → latest):</strong>
