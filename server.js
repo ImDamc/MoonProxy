@@ -8,15 +8,15 @@ app.get("/", (req, res) => res.send("Proxy active"))
 
 app.get("/search", async (req, res) => {
   const q = (req.query.q || "").trim()
-  if (!q) return res.status(400).json({ error: "missing q" })
+  if (!q) return res.status(400).send("missing q")
 
-  const url = "https://www.google.com/search?q=" + encodeURIComponent(q)
+  const url = "https://duckduckgo.com/html/?q=" + encodeURIComponent(q)
 
   try {
     const r = await fetch(url, {
       headers: {
         "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36"
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
       }
     })
 
@@ -25,7 +25,7 @@ app.get("/search", async (req, res) => {
     res.send(body)
   } catch (e) {
     console.error(e)
-    res.status(500).send("Failed to fetch page")
+    res.status(500).send("Failed to fetch")
   }
 })
 
