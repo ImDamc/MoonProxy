@@ -1,32 +1,58 @@
-import express from "express"
-import fetch from "node-fetch"
+const express = require("express")
+const fetch = require("node-fetch")
+const cheerio = require("cheerio")
 
 const app = express()
-const PORT = process.env.PORT || 10000
+const PORT = process.env.PORT || 3000
 
-app.get("/", (req, res) => res.send("Proxy active"))
+function isGoogleUrl(url) {
+  return true
+}
 
-app.get("/search", async (req, res) => {
-  const q = (req.query.q || "").trim()
-  if (!q) return res.status(400).send("missing q")
+app.get("/", (req, res) => {
+  res.send(`
+    <form action="/fetch" method="get">
+      <input name="url" placeholder="https://www.google.com/search?q=test" style="width:60%">
+      <button>Fetch</button>
+    </form>
+    <p>Only google.com URLs are allowed.</p>
+  `)
+})
 
-  const url = "https://duckduckgo.com/html/?q=" + encodeURIComponent(q)
+app.get("/fetch", async (req, res) => {
+  const { url } = req.query
+  if (!url) return res.status(400).send("Missing ?url=")
+  if (!isGoogleUrl(url)) return res.status(403).send("Only google.com URLs allowed")
 
   try {
-    const r = await fetch(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-      }
-    })
+    const r = await fetch(url, { headers: { "User-Agent": "EducationalProxy/1.0" } })
+    const contentType = r.headers.get("content-type") || ""
 
-    res.set("Content-Type", r.headers.get("content-type") || "text/html")
-    const body = await r.text()
-    res.send(body)
-  } catch (e) {
-    console.error(e)
-    res.status(500).send("Failed to fetch")
+    if (contentType.includes("text/html")) {
+      const text = await r.text()
+      const $ = cheerio.load(text)
+
+      $("a[href]").each((i, el) => {
+        const href = $(el).attr("href")
+        if (!href) return
+        try {
+          const resolved = new URL(href, url).toString()
+          if (isGoogleUrl(resolved)) {
+            $(el).attr("href", "/fetch?url=" + encodeURIComponent(resolved))
+          } else {
+            $(el).attr("target", "_blank")
+          }
+        } catch {}
+      })
+
+      res.set("Content-Type", "text/html").send($.html())
+    } else {
+      const buf = await r.buffer()
+      res.set("Content-Type", contentType).send(buf)
+    }
+  } catch (err) {
+    res.status(500).send("Fetch failed: " + err.message)
   }
 })
 
-app.listen(PORT, () => console.log("Running on", PORT))
+app.listen(PORT, () => console.log("Google-only proxy listening on port", PORT))
