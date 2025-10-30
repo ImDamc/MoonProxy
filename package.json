@@ -1,14 +1,11 @@
 {
-  "name": "search-proxy",
-  "version": "1.0.0",
-  "type": "module",
-  "main": "server.js",
+  "name":"google-proxy",
+  "version":"1.0.0",
+  "main":"server.js",
   "dependencies": {
     "express": "^4.19.2",
-    "node-fetch": "^3.3.2",
-    "ioredis": "^5.4.1"
+    "node-fetch": "^2.6.7",
+    "cheerio": "^1.0.0-rc.12"
   },
-  "scripts": {
-    "start": "node server.js"
-  }
+  "scripts": { "start": "node server.js" }
 }
