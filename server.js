@@ -1,94 +1,78 @@
 import express from "express"
 import fetch from "node-fetch"
-import * as cheerio from "cheerio"
 
 const app = express()
-const PORT = process.env.PORT || 10000
+const PORT = process.env.PORT || 3000
 
-function normalizeUrl(q) {
-  if (!q) return null
-  const t = q.trim()
-  if (t.startsWith("http://") || t.startsWith("https://")) return t
-  if (t.includes(".")) return "https://" + t
-  return "https://www.google.com/search?q=" + encodeURIComponent(t)
-}
+const disallowedHopHeaders = [
+  "content-encoding",
+  "transfer-encoding",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "upgrade",
+]
 
-function isAllowed(url) {
-  return true
-}
-
-async function fetchFollow(url, depth = 0) {
-  if (depth > 15) throw new Error("redirect loop")
-  const r = await fetch(url, {
-    redirect: "manual",
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-      "Accept-Language": "en-US,en;q=0.9",
-      "Accept":
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      "Connection": "keep-alive"
-    }
-  })
-  if (r.status >= 300 && r.status < 400) {
-    const loc = r.headers.get("location")
-    if (!loc) return r
-    const next = new URL(loc, url).toString()
-    if (!isAllowed(next)) return r
-    return fetchFollow(next, depth + 1)
-  }
-  return r
-}
-
-app.get("/", (req, res) => {
-  res.send(`
-    <form action="/search" method="get">
-      <input name="q" placeholder="https://discord.com, google.com, or search term" style="width:60%">
-      <button>Go</button>
-    </form>
-    <p>Allowed: google.com, discord.com only</p>
-  `)
-})
-
-app.get("/search", async (req, res) => {
-  const q = req.query.q || ""
-  const target = normalizeUrl(q)
-  if (!target) return res.status(400).send("Missing ?q=")
-  if (!isAllowed(target)) return res.status(403).send("Only google.com and discord.com allowed")
-
+async function proxyRequest(targetUrl, req, res) {
   try {
-    const r = await fetchFollow(target)
-    const contentType = r.headers.get("content-type") || ""
-    const cookies = r.headers.get("set-cookie") || ""
-    const text = await r.text()
-
-    if (!contentType.includes("text/html")) {
-      res.set("Content-Type", contentType)
-      return res.send(text)
-    }
-
-    const $ = cheerio.load(text)
-    $("a[href]").each((_, el) => {
-      const href = $(el).attr("href")
-      if (!href) return
-      try {
-        const abs = new URL(href, target).toString()
-        if (isAllowed(abs)) $(el).attr("href", "/search?q=" + encodeURIComponent(abs))
-        else $(el).attr("target", "_blank")
-      } catch {}
+    const upstream = await fetch(targetUrl, {
+      headers: {
+        ...req.headers,
+        "host": new URL(targetUrl).host,
+        "origin": new URL(targetUrl).origin,
+        "referer": new URL(targetUrl).origin + "/",
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "accept":
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.9",
+      },
+      redirect: "manual",
     })
 
-    const banner = `
-      <div style="background:#eef;padding:10px;font-family:monospace;">
-        <strong>Fetched:</strong> ${target}<br>
-        <strong>Cookies:</strong> ${cookies || "(none)"}<br>
-        <strong>Type:</strong> ${contentType}
-      </div>
-    `
-    res.set("Content-Type", "text/html").send(banner + $.html())
+    if (
+      upstream.status >= 300 &&
+      upstream.status < 400 &&
+      upstream.headers.get("location")
+    ) {
+      const redirectUrl = upstream.headers.get("location")
+      const absoluteRedirect = new URL(redirectUrl, targetUrl).href
+      console.log("Redirecting to:", absoluteRedirect)
+      return proxyRequest(absoluteRedirect, req, res)
+    }
+
+    for (const [key, value] of upstream.headers.entries()) {
+      if (!disallowedHopHeaders.includes(key.toLowerCase()))
+        res.setHeader(key, value)
+    }
+
+    const buffer = await upstream.arrayBuffer()
+    res.status(upstream.status).send(Buffer.from(buffer))
   } catch (err) {
-    res.status(500).send("Failed: " + err.message)
+    console.error("Proxy error:", err)
+    res.status(500).send("Proxy error occurred.")
   }
+}
+
+app.get("/search", async (req, res) => {
+  const targetUrl = req.query.q
+  if (!targetUrl) return res.status(400).send("Missing ?q parameter")
+  if (!/^https?:\/\//i.test(targetUrl))
+    return res.status(400).send("Invalid URL")
+  await proxyRequest(targetUrl, req, res)
 })
 
-app.listen(PORT, () => console.log("Running on", PORT))
+app.get("/proxy/*", async (req, res) => {
+  const path = req.params[0]
+  const targetUrl = path.startsWith("http") ? path : "https://" + path
+  if (!/^https?:\/\//i.test(targetUrl))
+    return res.status(400).send("Invalid target URL")
+  await proxyRequest(targetUrl, req, res)
+})
+
+app.listen(PORT, () =>
+  console.log(`✅ Proxy running on port ${PORT}`)
+)
