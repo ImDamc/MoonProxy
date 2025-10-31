@@ -1,6 +1,6 @@
 import express from "express"
-import puppeteer from "puppeteer-core"
-import chromium from "chromium"
+import fetch from "node-fetch"
+import cheerio from "cheerio"
 
 const app = express()
 const PORT = process.env.PORT || 10000
@@ -17,69 +17,78 @@ function isAllowed(url) {
   return true
 }
 
+async function fetchFollow(url, depth = 0) {
+  if (depth > 15) throw new Error("redirect loop")
+  const r = await fetch(url, {
+    redirect: "manual",
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Accept":
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "Connection": "keep-alive"
+    }
+  })
+  if (r.status >= 300 && r.status < 400) {
+    const loc = r.headers.get("location")
+    if (!loc) return r
+    const next = new URL(loc, url).toString()
+    if (!isAllowed(next)) return r
+    return fetchFollow(next, depth + 1)
+  }
+  return r
+}
+
 app.get("/", (req, res) => {
   res.send(`
     <form action="/search" method="get">
-      <input name="q" placeholder="google.com, discord.com, or search term" style="width:60%">
+      <input name="q" placeholder="https://discord.com, google.com, or search term" style="width:60%">
       <button>Go</button>
     </form>
-    <p>Allowed domains: google.com, discord.com</p>
+    <p>Allowed: google.com, discord.com only</p>
   `)
 })
 
 app.get("/search", async (req, res) => {
-  const raw = req.query.q || ""
-  const target = normalizeUrl(raw)
+  const q = req.query.q || ""
+  const target = normalizeUrl(q)
   if (!target) return res.status(400).send("Missing ?q=")
   if (!isAllowed(target)) return res.status(403).send("Only google.com and discord.com allowed")
 
-  let browser
   try {
-    browser = await puppeteer.launch({
-      executablePath: chromium.path,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--disable-software-rasterizer",
-        "--no-zygote",
-        "--single-process"
-      ],
-      headless: true,
-      timeout: 0
-    })
+    const r = await fetchFollow(target)
+    const contentType = r.headers.get("content-type") || ""
+    const cookies = r.headers.get("set-cookie") || ""
+    const text = await r.text()
 
-    const page = await browser.newPage()
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-    await page.setDefaultNavigationTimeout(60000)
-
-    let current = target
-    const chain = []
-    for (let i = 0; i < 15; i++) {
-      chain.push(current)
-      if (!isAllowed(current)) break
-      await page.goto(current, { waitUntil: "networkidle0", timeout: 60000 })
-      const next = page.url()
-      if (next === current) break
-      current = next
+    if (!contentType.includes("text/html")) {
+      res.set("Content-Type", contentType)
+      return res.send(text)
     }
 
-    const html = await page.content()
-    await browser.close()
+    const $ = cheerio.load(text)
+    $("a[href]").each((_, el) => {
+      const href = $(el).attr("href")
+      if (!href) return
+      try {
+        const abs = new URL(href, target).toString()
+        if (isAllowed(abs)) $(el).attr("href", "/search?q=" + encodeURIComponent(abs))
+        else $(el).attr("target", "_blank")
+      } catch {}
+    })
 
-    res.set("Content-Type", "text/html")
-    res.send(`
-      <div style="background:#eef;padding:10px;font-family:monospace">
-        <strong>Redirect chain:</strong>
-        <ol>${chain.map(u => `<li><a href="/search?q=${encodeURIComponent(u)}">${u}</a></li>`).join("")}</ol>
+    const banner = `
+      <div style="background:#eef;padding:10px;font-family:monospace;">
+        <strong>Fetched:</strong> ${target}<br>
+        <strong>Cookies:</strong> ${cookies || "(none)"}<br>
+        <strong>Type:</strong> ${contentType}
       </div>
-      ${html}
-    `)
+    `
+    res.set("Content-Type", "text/html").send(banner + $.html())
   } catch (err) {
-    if (browser) await browser.close().catch(() => {})
-    res.status(500).send("Fetch/render failed: " + err.message)
+    res.status(500).send("Failed: " + err.message)
   }
 })
 
-app.listen(PORT, () => console.log("Server running on port", PORT))
+app.listen(PORT, () => console.log("Running on", PORT))
