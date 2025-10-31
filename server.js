@@ -1,44 +1,92 @@
 import express from "express"
 import fetch from "node-fetch"
+import * as cheerio from "cheerio"
 
 const app = express()
 const PORT = process.env.PORT || 3000
-const blocked = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade", "transfer-encoding", "content-encoding"]
 
-async function proxyRequest(targetUrl, req, res) {
-  try {
-    const response = await fetch(targetUrl, {
-      headers: {
-        ...req.headers,
-        host: new URL(targetUrl).host,
-        origin: new URL(targetUrl).origin,
-        referer: new URL(targetUrl).origin + "/",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-      },
-      redirect: "manual"
+function isAllowedUrl(url) {
+  return true
+}
+
+function normalizeInput(q) {
+  if (!q) return null
+  const t = q.trim()
+  if (t.startsWith("http://") || t.startsWith("https://")) return t
+  if (t.includes(".")) return "https://" + t
+  return "https://www.google.com/search?q=" + encodeURIComponent(t)
+}
+
+async function fetchWithRedirects(startUrl, maxRedirects = 15) {
+  let url = startUrl
+  for (let i = 0; i < maxRedirects; i++) {
+    const r = await fetch(url, {
+      redirect: "manual",
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
     })
-
-    if (response.status >= 300 && response.status < 400 && response.headers.get("location")) {
-      const redirectUrl = new URL(response.headers.get("location"), targetUrl).href
-      return proxyRequest(redirectUrl, req, res)
+    if (r.status >= 300 && r.status < 400) {
+      const loc = r.headers.get("location")
+      if (!loc) return { url, res: r }
+      url = new URL(loc, url).toString()
+      continue
     }
-
-    for (const [key, value] of response.headers.entries())
-      if (!blocked.includes(key.toLowerCase())) res.setHeader(key, value)
-
-    const data = await response.arrayBuffer()
-    res.status(response.status).send(Buffer.from(data))
-  } catch (e) {
-    res.status(500).send("Proxy Error: " + e.message)
+    return { url, res: r }
   }
+  throw new Error("Too many redirects")
 }
 
 app.get("/search", async (req, res) => {
-  let target = req.query.q
-  if (!target) return res.status(400).send("Missing ?q=")
-  if (!/^https?:\/\//i.test(target))
-    target = "https://www.google.com/search?q=" + encodeURIComponent(target)
-  await proxyRequest(target, req, res)
+  const raw = req.query.q || ""
+  const normalized = normalizeInput(raw)
+  if (!normalized) return res.status(400).send("Missing ?q=")
+  if (!isAllowedUrl(normalized)) return res.status(403).send("Only discord.com and google.com allowed")
+
+  try {
+    const { url, res: remote } = await fetchWithRedirects(normalized)
+    const contentType = remote.headers.get("content-type") || ""
+
+    if (!contentType.includes("text/html")) {
+      res.set("Content-Type", contentType)
+      return res.send(await remote.buffer())
+    }
+
+    const html = await remote.text()
+    const $ = cheerio.load(html)
+
+    $("a[href]").each((_, el) => {
+      const href = $(el).attr("href")
+      if (!href || href.startsWith("data:") || href.startsWith("javascript:")) return
+      const absolute = new URL(href, url).toString()
+      $(el).attr("href", "/search?q=" + encodeURIComponent(absolute))
+    })
+
+    $("form[action]").each((_, el) => {
+      const action = $(el).attr("action")
+      if (!action) return
+      const absolute = new URL(action, url).toString()
+      $(el).attr("action", "/search?q=" + encodeURIComponent(absolute))
+    })
+
+    $("img[src]").each((_, el) => {
+      const src = $(el).attr("src")
+      if (!src || src.startsWith("data:")) return
+      const absolute = new URL(src, url).toString()
+      $(el).attr("src", "/search?q=" + encodeURIComponent(absolute))
+    })
+
+    res.set("Content-Type", "text/html")
+    res.send($.html())
+  } catch (err) {
+    console.error(err)
+    res.status(500).send("Fetch failed: " + err.message)
+  }
 })
 
-app.listen(PORT, () => console.log("Proxy on " + PORT))
+app.get("/", (req, res) => {
+  res.send(`<form action="/search" method="get">
+    <input name="q" placeholder="https://discord.com/login or google.com">
+    <button>Go</button>
+  </form>`)
+})
+
+app.listen(PORT, () => console.log("Proxy active on", PORT))
