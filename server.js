@@ -33,8 +33,9 @@ app.get("/search", async (req, res) => {
   if (!target) return res.status(400).send("Missing ?q=")
   if (!isAllowed(target)) return res.status(403).send("Only google.com and discord.com allowed")
 
+  let browser
   try {
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       executablePath: chromium.path,
       args: [
         "--no-sandbox",
@@ -43,19 +44,22 @@ app.get("/search", async (req, res) => {
         "--disable-gpu",
         "--disable-software-rasterizer",
         "--no-zygote",
+        "--single-process"
       ],
-      headless: true
+      headless: true,
+      timeout: 0
     })
 
     const page = await browser.newPage()
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+    await page.setDefaultNavigationTimeout(60000)
 
     let current = target
     const chain = []
     for (let i = 0; i < 15; i++) {
       chain.push(current)
       if (!isAllowed(current)) break
-      await page.goto(current, { waitUntil: "networkidle2", timeout: 20000 })
+      await page.goto(current, { waitUntil: "networkidle0", timeout: 60000 })
       const next = page.url()
       if (next === current) break
       current = next
@@ -73,7 +77,7 @@ app.get("/search", async (req, res) => {
       ${html}
     `)
   } catch (err) {
-    console.error("Fetch/render failed:", err)
+    if (browser) await browser.close().catch(() => {})
     res.status(500).send("Fetch/render failed: " + err.message)
   }
 })
