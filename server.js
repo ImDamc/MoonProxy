@@ -1,6 +1,6 @@
 import express from "express"
 import fetch from "node-fetch"
-import cheerio from "cheerio"
+import * as cheerio from "cheerio"
 
 const app = express()
 const PORT = process.env.PORT || 10000
