@@ -5,7 +5,7 @@ const cheerio = require("cheerio")
 const app = express()
 const PORT = process.env.PORT || 3000
 
-function isGoogleUrl(url) {
+function isAllowedUrl(url) {
   return true
 }
 
@@ -30,7 +30,7 @@ async function fetchWithRedirects(startUrl, maxRedirects = 15) {
       if (!loc) return { chain, final: { url, status: r.status, headers: r.headers, body: await r.text() } }
       let next
       try { next = new URL(loc, url).toString() } catch { return { chain, final: { url, status: r.status, headers: r.headers, body: await r.text() } } }
-      if (!isGoogleUrl(next)) { chain.push(next); return { chain, final: { url: next, status: r.status, headers: r.headers, body: null, stoppedAtNonGoogle: true } } }
+      if (!isAllowedUrl(next)) { chain.push(next); return { chain, final: { url: next, status: r.status, headers: r.headers, body: null, stoppedAtNonAllowed: true } } }
       url = next
       continue
     }
@@ -47,7 +47,7 @@ async function fetchWithRedirects(startUrl, maxRedirects = 15) {
       if (m.length > 1 && m[1].toLowerCase().startsWith("url=")) {
         let loc = m[1].slice(4)
         try { loc = new URL(loc, url).toString() } catch { return { chain, final: { url, status: r.status, headers: r.headers, body } } }
-        if (!isGoogleUrl(loc)) { chain.push(loc); return { chain, final: { url: loc, status: r.status, headers: r.headers, body: null, stoppedAtNonGoogle: true } } }
+        if (!isAllowedUrl(loc)) { chain.push(loc); return { chain, final: { url: loc, status: r.status, headers: r.headers, body: null, stoppedAtNonAllowed: true } } }
         url = loc
         continue
       }
@@ -60,10 +60,10 @@ async function fetchWithRedirects(startUrl, maxRedirects = 15) {
 app.get("/", (req, res) => {
   res.send(`
     <form action="/search" method="get">
-      <input name="q" placeholder="google.com or https://www.google.com/search?q=test or a search term" style="width:60%">
+      <input name="q" placeholder="google.com or discord.com or a search term" style="width:60%">
       <button>Fetch</button>
     </form>
-    <p>Only google.com URLs allowed. You can pass plain host (google.com), full URL, or a search term.</p>
+    <p>Only google.com and discord.com URLs allowed.</p>
   `)
 })
 
@@ -71,13 +71,13 @@ app.get("/search", async (req, res) => {
   const raw = req.query.q || ""
   const normalized = normalizeInput(raw)
   if (!normalized) return res.status(400).send("Missing ?q=")
-  if (!isGoogleUrl(normalized)) return res.status(403).send("Only google.com URLs allowed")
+  if (!isAllowedUrl(normalized)) return res.status(403).send("Only google.com and discord.com URLs allowed")
   try {
     const { chain, final } = await fetchWithRedirects(normalized, 20)
     if (final.error) return res.status(500).send("Error: " + final.error)
-    if (final.stoppedAtNonGoogle) {
+    if (final.stoppedAtNonAllowed) {
       return res.status(200).send(
-        `<p>Stopped following redirect because it goes off-google:</p>
+        `<p>Stopped following redirect because it goes off allowed domains:</p>
          <pre>${JSON.stringify(chain, null, 2)}</pre>
          <p>Final redirect target (not fetched): <a href="${chain[chain.length-1]}" target="_blank">${chain[chain.length-1]}</a></p>`
       )
@@ -92,7 +92,7 @@ app.get("/search", async (req, res) => {
       if (!href) return
       try {
         const resolved = new URL(href, final.url).toString()
-        if (isGoogleUrl(resolved)) $(el).attr("href", "/search?q=" + encodeURIComponent(resolved))
+        if (isAllowedUrl(resolved)) $(el).attr("href", "/search?q=" + encodeURIComponent(resolved))
         else $(el).attr("target", "_blank")
       } catch {}
     })
@@ -116,4 +116,4 @@ app.get("/search", async (req, res) => {
   }
 })
 
-app.listen(PORT, () => console.log("Google-only proxy listening on port", PORT))
+app.listen(PORT, () => console.log("Proxy listening on port", PORT))
