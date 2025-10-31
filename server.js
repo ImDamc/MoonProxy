@@ -3,76 +3,42 @@ import fetch from "node-fetch"
 
 const app = express()
 const PORT = process.env.PORT || 3000
-
-const disallowedHopHeaders = [
-  "content-encoding",
-  "transfer-encoding",
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "upgrade",
-]
+const blocked = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade", "transfer-encoding", "content-encoding"]
 
 async function proxyRequest(targetUrl, req, res) {
   try {
-    const upstream = await fetch(targetUrl, {
+    const response = await fetch(targetUrl, {
       headers: {
         ...req.headers,
-        "host": new URL(targetUrl).host,
-        "origin": new URL(targetUrl).origin,
-        "referer": new URL(targetUrl).origin + "/",
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-        "accept":
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-        "accept-language": "en-US,en;q=0.9",
+        host: new URL(targetUrl).host,
+        origin: new URL(targetUrl).origin,
+        referer: new URL(targetUrl).origin + "/",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
       },
-      redirect: "manual",
+      redirect: "manual"
     })
 
-    if (
-      upstream.status >= 300 &&
-      upstream.status < 400 &&
-      upstream.headers.get("location")
-    ) {
-      const redirectUrl = upstream.headers.get("location")
-      const absoluteRedirect = new URL(redirectUrl, targetUrl).href
-      console.log("Redirecting to:", absoluteRedirect)
-      return proxyRequest(absoluteRedirect, req, res)
+    if (response.status >= 300 && response.status < 400 && response.headers.get("location")) {
+      const redirectUrl = new URL(response.headers.get("location"), targetUrl).href
+      return proxyRequest(redirectUrl, req, res)
     }
 
-    for (const [key, value] of upstream.headers.entries()) {
-      if (!disallowedHopHeaders.includes(key.toLowerCase()))
-        res.setHeader(key, value)
-    }
+    for (const [key, value] of response.headers.entries())
+      if (!blocked.includes(key.toLowerCase())) res.setHeader(key, value)
 
-    const buffer = await upstream.arrayBuffer()
-    res.status(upstream.status).send(Buffer.from(buffer))
-  } catch (err) {
-    console.error("Proxy error:", err)
-    res.status(500).send("Proxy error occurred.")
+    const data = await response.arrayBuffer()
+    res.status(response.status).send(Buffer.from(data))
+  } catch (e) {
+    res.status(500).send("Proxy Error: " + e.message)
   }
 }
 
 app.get("/search", async (req, res) => {
-  const targetUrl = req.query.q
-  if (!targetUrl) return res.status(400).send("Missing ?q parameter")
-  if (!/^https?:\/\//i.test(targetUrl))
-    return res.status(400).send("Invalid URL")
-  await proxyRequest(targetUrl, req, res)
+  let target = req.query.q
+  if (!target) return res.status(400).send("Missing ?q=")
+  if (!/^https?:\/\//i.test(target))
+    target = "https://www.google.com/search?q=" + encodeURIComponent(target)
+  await proxyRequest(target, req, res)
 })
 
-app.get("/proxy/*", async (req, res) => {
-  const path = req.params[0]
-  const targetUrl = path.startsWith("http") ? path : "https://" + path
-  if (!/^https?:\/\//i.test(targetUrl))
-    return res.status(400).send("Invalid target URL")
-  await proxyRequest(targetUrl, req, res)
-})
-
-app.listen(PORT, () =>
-  console.log(`✅ Proxy running on port ${PORT}`)
-)
+app.listen(PORT, () => console.log("Proxy on " + PORT))
